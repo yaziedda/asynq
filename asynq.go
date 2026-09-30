@@ -282,9 +282,12 @@ type RabbitMQClientOpt struct {
 }
 
 // MakeRedisClient satisfies the RedisConnOpt interface so RabbitMQClientOpt can be
-// passed to NewClient and NewServer. It returns nil; the actual broker is built by
-// makeBroker, which intercepts RabbitMQClientOpt before this is ever used.
-func (opt RabbitMQClientOpt) MakeRedisClient() interface{} { return nil }
+// passed to NewClient and NewServer. It returns a dummy redis client to satisfy
+// third-party tools like asynqmon that aggressively type-check this return value;
+// the actual broker is built by makeBroker which intercepts RabbitMQClientOpt directly.
+func (opt RabbitMQClientOpt) MakeRedisClient() interface{} {
+	return redis.NewClient(&redis.Options{})
+}
 
 // makeBroker builds a base.Broker from a connection option. It intercepts
 // RabbitMQClientOpt to build a RabbitMQ broker; otherwise it builds a Redis broker.

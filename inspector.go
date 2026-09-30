@@ -14,23 +14,79 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/rmq"
 	"github.com/redis/go-redis/v9"
 )
+
+type inspectorBackend interface {
+	Close() error
+	AllQueues() ([]string, error)
+	CurrentStats(qname string) (*rdb.Stats, error)
+	HistoricalStats(qname string, n int) ([]*rdb.DailyStats, error)
+	ListPending(qname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	ListActive(qname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	ListScheduled(qname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	ListRetry(qname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	ListArchived(qname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	ListCompleted(qname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	ListAggregating(qname, gname string, pgn rdb.Pagination) ([]*base.TaskInfo, error)
+	GroupStats(qname string) ([]*rdb.GroupStat, error)
+	GetTaskInfo(qname, id string) (*base.TaskInfo, error)
+	DeleteTask(qname, id string) error
+	DeleteAllPendingTasks(qname string) (int64, error)
+	DeleteAllScheduledTasks(qname string) (int64, error)
+	DeleteAllRetryTasks(qname string) (int64, error)
+	DeleteAllArchivedTasks(qname string) (int64, error)
+	DeleteAllCompletedTasks(qname string) (int64, error)
+	DeleteAllAggregatingTasks(qname, gname string) (int64, error)
+	ArchiveTask(qname, id string) error
+	ArchiveAllPendingTasks(qname string) (int64, error)
+	ArchiveAllScheduledTasks(qname string) (int64, error)
+	ArchiveAllRetryTasks(qname string) (int64, error)
+	ArchiveAllAggregatingTasks(qname, gname string) (int64, error)
+	RunTask(qname, id string) error
+	RunAllScheduledTasks(qname string) (int64, error)
+	RunAllRetryTasks(qname string) (int64, error)
+	RunAllArchivedTasks(qname string) (int64, error)
+	RunAllAggregatingTasks(qname, gname string) (int64, error)
+	Pause(qname string) error
+	Unpause(qname string) error
+	RemoveQueue(qname string, force bool) error
+	ListLeaseExpired(cutoff time.Time, qnames ...string) ([]*base.TaskMessage, error)
+	ListServers() ([]*base.ServerInfo, error)
+	ListWorkers() ([]*base.WorkerInfo, error)
+	ClusterKeySlot(qname string) (int64, error)
+	ClusterNodes(qname string) ([]redis.ClusterNode, error)
+	ListSchedulerEntries() ([]*base.SchedulerEntry, error)
+	ListSchedulerEnqueueEvents(entryID string, pgn rdb.Pagination) ([]*base.SchedulerEnqueueEvent, error)
+	UpdateTaskPayload(qname, id string, payload []byte) error
+	PublishCancelation(id string) error
+}
 
 // Inspector is a client interface to inspect and mutate the state of
 // queues and tasks.
 type Inspector struct {
-	rdb *rdb.RDB
+	backend inspectorBackend
 	// When an Inspector has been created with an existing Redis connection, we do
 	// not want to close it.
 	sharedConnection bool
 }
 
-// New returns a new instance of Inspector.
+// NewInspector returns a new instance of Inspector.
 func NewInspector(r RedisConnOpt) *Inspector {
+	if opt, ok := r.(RabbitMQClientOpt); ok {
+		backend, err := rmq.NewInspector(opt.URL)
+		if err != nil {
+			panic(fmt.Sprintf("asynq: could not initialize RabbitMQ inspector: %v", err))
+		}
+		return &Inspector{
+			backend:          backend,
+			sharedConnection: false,
+		}
+	}
 	c, ok := r.MakeRedisClient().(redis.UniversalClient)
 	if !ok {
-		panic(fmt.Sprintf("inspeq: unsupported RedisConnOpt type %T", r))
+		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
 	}
 	inspector := NewInspectorFromRedisClient(c)
 	inspector.sharedConnection = false
@@ -41,7 +97,7 @@ func NewInspector(r RedisConnOpt) *Inspector {
 // Warning: The underlying redis connection pool will not be closed by Asynq, you are responsible for closing it.
 func NewInspectorFromRedisClient(c redis.UniversalClient) *Inspector {
 	return &Inspector{
-		rdb:              rdb.NewRDB(c),
+		backend:          rdb.NewRDB(c),
 		sharedConnection: true,
 	}
 }
@@ -51,17 +107,17 @@ func (i *Inspector) Close() error {
 	if i.sharedConnection {
 		return fmt.Errorf("redis connection is shared so the Inspector can't be closed through asynq")
 	}
-	return i.rdb.Close()
+	return i.backend.Close()
 }
 
 // Queues returns a list of all queue names.
 func (i *Inspector) Queues() ([]string, error) {
-	return i.rdb.AllQueues()
+	return i.backend.AllQueues()
 }
 
 // Groups returns a list of all groups within the given queue.
 func (i *Inspector) Groups(queue string) ([]*GroupInfo, error) {
-	stats, err := i.rdb.GroupStats(queue)
+	stats, err := i.backend.GroupStats(queue)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +198,7 @@ func (i *Inspector) GetQueueInfo(queue string) (*QueueInfo, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return nil, err
 	}
-	stats, err := i.rdb.CurrentStats(queue)
+	stats, err := i.backend.CurrentStats(queue)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +242,7 @@ func (i *Inspector) History(queue string, n int) ([]*DailyStats, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return nil, err
 	}
-	stats, err := i.rdb.HistoricalStats(queue, n)
+	stats, err := i.backend.HistoricalStats(queue, n)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +280,7 @@ var (
 // If force is set to false and the specified queue is not empty, DeleteQueue
 // returns ErrQueueNotEmpty.
 func (i *Inspector) DeleteQueue(queue string, force bool) error {
-	err := i.rdb.RemoveQueue(queue, force)
+	err := i.backend.RemoveQueue(queue, force)
 	if errors.IsQueueNotFound(err) {
 		return fmt.Errorf("%w: queue=%q", ErrQueueNotFound, queue)
 	}
@@ -239,7 +295,7 @@ func (i *Inspector) DeleteQueue(queue string, force bool) error {
 // Returns an error wrapping ErrQueueNotFound if a queue with the given name doesn't exist.
 // Returns an error wrapping ErrTaskNotFound if a task with the given id doesn't exist in the queue.
 func (i *Inspector) GetTaskInfo(queue, id string) (*TaskInfo, error) {
-	info, err := i.rdb.GetTaskInfo(queue, id)
+	info, err := i.backend.GetTaskInfo(queue, id)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -321,7 +377,7 @@ func (i *Inspector) ListPendingTasks(queue string, opts ...ListOption) ([]*TaskI
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListPending(queue, pgn)
+	infos, err := i.backend.ListPending(queue, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -349,14 +405,14 @@ func (i *Inspector) ListActiveTasks(queue string, opts ...ListOption) ([]*TaskIn
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListActive(queue, pgn)
+	infos, err := i.backend.ListActive(queue, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
 	case err != nil:
 		return nil, fmt.Errorf("asynq: %w", err)
 	}
-	expired, err := i.rdb.ListLeaseExpired(time.Now(), queue)
+	expired, err := i.backend.ListLeaseExpired(time.Now(), queue)
 	if err != nil {
 		return nil, fmt.Errorf("asynq: %w", err)
 	}
@@ -389,7 +445,7 @@ func (i *Inspector) ListAggregatingTasks(queue, group string, opts ...ListOption
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListAggregating(queue, group, pgn)
+	infos, err := i.backend.ListAggregating(queue, group, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -418,7 +474,7 @@ func (i *Inspector) ListScheduledTasks(queue string, opts ...ListOption) ([]*Tas
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListScheduled(queue, pgn)
+	infos, err := i.backend.ListScheduled(queue, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -447,7 +503,7 @@ func (i *Inspector) ListRetryTasks(queue string, opts ...ListOption) ([]*TaskInf
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListRetry(queue, pgn)
+	infos, err := i.backend.ListRetry(queue, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -476,7 +532,7 @@ func (i *Inspector) ListArchivedTasks(queue string, opts ...ListOption) ([]*Task
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListArchived(queue, pgn)
+	infos, err := i.backend.ListArchived(queue, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -505,7 +561,7 @@ func (i *Inspector) ListCompletedTasks(queue string, opts ...ListOption) ([]*Tas
 	}
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	infos, err := i.rdb.ListCompleted(queue, pgn)
+	infos, err := i.backend.ListCompleted(queue, pgn)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return nil, fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -530,7 +586,7 @@ func (i *Inspector) DeleteAllPendingTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.DeleteAllPendingTasks(queue)
+	n, err := i.backend.DeleteAllPendingTasks(queue)
 	return int(n), err
 }
 
@@ -540,7 +596,7 @@ func (i *Inspector) DeleteAllScheduledTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.DeleteAllScheduledTasks(queue)
+	n, err := i.backend.DeleteAllScheduledTasks(queue)
 	return int(n), err
 }
 
@@ -550,7 +606,7 @@ func (i *Inspector) DeleteAllRetryTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.DeleteAllRetryTasks(queue)
+	n, err := i.backend.DeleteAllRetryTasks(queue)
 	return int(n), err
 }
 
@@ -560,7 +616,7 @@ func (i *Inspector) DeleteAllArchivedTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.DeleteAllArchivedTasks(queue)
+	n, err := i.backend.DeleteAllArchivedTasks(queue)
 	return int(n), err
 }
 
@@ -570,7 +626,7 @@ func (i *Inspector) DeleteAllCompletedTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.DeleteAllCompletedTasks(queue)
+	n, err := i.backend.DeleteAllCompletedTasks(queue)
 	return int(n), err
 }
 
@@ -580,7 +636,7 @@ func (i *Inspector) DeleteAllAggregatingTasks(queue, group string) (int, error) 
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.DeleteAllAggregatingTasks(queue, group)
+	n, err := i.backend.DeleteAllAggregatingTasks(queue, group)
 	return int(n), err
 }
 
@@ -595,7 +651,7 @@ func (i *Inspector) UpdateTaskPayload(queue, id string, payload []byte) error {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return fmt.Errorf("asynq: %v", err)
 	}
-	err := i.rdb.UpdateTaskPayload(queue, id, payload)
+	err := i.backend.UpdateTaskPayload(queue, id, payload)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -619,7 +675,7 @@ func (i *Inspector) DeleteTask(queue, id string) error {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return fmt.Errorf("asynq: %w", err)
 	}
-	err := i.rdb.DeleteTask(queue, id)
+	err := i.backend.DeleteTask(queue, id)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -638,7 +694,7 @@ func (i *Inspector) RunAllScheduledTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.RunAllScheduledTasks(queue)
+	n, err := i.backend.RunAllScheduledTasks(queue)
 	return int(n), err
 }
 
@@ -648,7 +704,7 @@ func (i *Inspector) RunAllRetryTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.RunAllRetryTasks(queue)
+	n, err := i.backend.RunAllRetryTasks(queue)
 	return int(n), err
 }
 
@@ -658,7 +714,7 @@ func (i *Inspector) RunAllArchivedTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.RunAllArchivedTasks(queue)
+	n, err := i.backend.RunAllArchivedTasks(queue)
 	return int(n), err
 }
 
@@ -668,7 +724,7 @@ func (i *Inspector) RunAllAggregatingTasks(queue, group string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.RunAllAggregatingTasks(queue, group)
+	n, err := i.backend.RunAllAggregatingTasks(queue, group)
 	return int(n), err
 }
 
@@ -683,7 +739,7 @@ func (i *Inspector) RunTask(queue, id string) error {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return fmt.Errorf("asynq: %w", err)
 	}
-	err := i.rdb.RunTask(queue, id)
+	err := i.backend.RunTask(queue, id)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -701,7 +757,7 @@ func (i *Inspector) ArchiveAllPendingTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.ArchiveAllPendingTasks(queue)
+	n, err := i.backend.ArchiveAllPendingTasks(queue)
 	return int(n), err
 }
 
@@ -711,7 +767,7 @@ func (i *Inspector) ArchiveAllScheduledTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.ArchiveAllScheduledTasks(queue)
+	n, err := i.backend.ArchiveAllScheduledTasks(queue)
 	return int(n), err
 }
 
@@ -721,7 +777,7 @@ func (i *Inspector) ArchiveAllRetryTasks(queue string) (int, error) {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.ArchiveAllRetryTasks(queue)
+	n, err := i.backend.ArchiveAllRetryTasks(queue)
 	return int(n), err
 }
 
@@ -731,7 +787,7 @@ func (i *Inspector) ArchiveAllAggregatingTasks(queue, group string) (int, error)
 	if err := base.ValidateQueueName(queue); err != nil {
 		return 0, err
 	}
-	n, err := i.rdb.ArchiveAllAggregatingTasks(queue, group)
+	n, err := i.backend.ArchiveAllAggregatingTasks(queue, group)
 	return int(n), err
 }
 
@@ -746,7 +802,7 @@ func (i *Inspector) ArchiveTask(queue, id string) error {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return fmt.Errorf("asynq: err")
 	}
-	err := i.rdb.ArchiveTask(queue, id)
+	err := i.backend.ArchiveTask(queue, id)
 	switch {
 	case errors.IsQueueNotFound(err):
 		return fmt.Errorf("asynq: %w", ErrQueueNotFound)
@@ -763,7 +819,7 @@ func (i *Inspector) ArchiveTask(queue, id string) error {
 // guarantee that the task with the given id will be canceled. The return
 // value only indicates whether the cancelation signal has been sent.
 func (i *Inspector) CancelProcessing(id string) error {
-	return i.rdb.PublishCancelation(id)
+	return i.backend.PublishCancelation(id)
 }
 
 // PauseQueue pauses task processing on the specified queue.
@@ -772,7 +828,7 @@ func (i *Inspector) PauseQueue(queue string) error {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return err
 	}
-	return i.rdb.Pause(queue)
+	return i.backend.Pause(queue)
 }
 
 // UnpauseQueue resumes task processing on the specified queue.
@@ -781,16 +837,16 @@ func (i *Inspector) UnpauseQueue(queue string) error {
 	if err := base.ValidateQueueName(queue); err != nil {
 		return err
 	}
-	return i.rdb.Unpause(queue)
+	return i.backend.Unpause(queue)
 }
 
 // Servers return a list of running servers' information.
 func (i *Inspector) Servers() ([]*ServerInfo, error) {
-	servers, err := i.rdb.ListServers()
+	servers, err := i.backend.ListServers()
 	if err != nil {
 		return nil, err
 	}
-	workers, err := i.rdb.ListWorkers()
+	workers, err := i.backend.ListWorkers()
 	if err != nil {
 		return nil, err
 	}
@@ -872,7 +928,7 @@ type WorkerInfo struct {
 
 // ClusterKeySlot returns an integer identifying the hash slot the given queue hashes to.
 func (i *Inspector) ClusterKeySlot(queue string) (int64, error) {
-	return i.rdb.ClusterKeySlot(queue)
+	return i.backend.ClusterKeySlot(queue)
 }
 
 // ClusterNode describes a node in redis cluster.
@@ -888,7 +944,7 @@ type ClusterNode struct {
 //
 // Only relevant if task queues are stored in redis cluster.
 func (i *Inspector) ClusterNodes(queue string) ([]*ClusterNode, error) {
-	nodes, err := i.rdb.ClusterNodes(queue)
+	nodes, err := i.backend.ClusterNodes(queue)
 	if err != nil {
 		return nil, err
 	}
@@ -925,7 +981,7 @@ type SchedulerEntry struct {
 // currently running schedulers.
 func (i *Inspector) SchedulerEntries() ([]*SchedulerEntry, error) {
 	var entries []*SchedulerEntry
-	res, err := i.rdb.ListSchedulerEntries()
+	res, err := i.backend.ListSchedulerEntries()
 	if err != nil {
 		return nil, err
 	}
@@ -1046,7 +1102,7 @@ type SchedulerEnqueueEvent struct {
 func (i *Inspector) ListSchedulerEnqueueEvents(entryID string, opts ...ListOption) ([]*SchedulerEnqueueEvent, error) {
 	opt := composeListOptions(opts...)
 	pgn := rdb.Pagination{Size: opt.pageSize, Page: opt.pageNum - 1}
-	data, err := i.rdb.ListSchedulerEnqueueEvents(entryID, pgn)
+	data, err := i.backend.ListSchedulerEnqueueEvents(entryID, pgn)
 	if err != nil {
 		return nil, err
 	}

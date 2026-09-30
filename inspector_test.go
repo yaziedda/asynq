@@ -280,7 +280,7 @@ func TestInspectorGetQueueInfo(t *testing.T) {
 	ignoreMemUsg := cmpopts.IgnoreFields(QueueInfo{}, "MemoryUsage")
 
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		pending                         map[string][]*base.TaskMessage
@@ -1677,7 +1677,7 @@ func TestInspectorArchiveAllPendingTasks(t *testing.T) {
 	z1 := base.Z{Message: m1, Score: now.Add(5 * time.Minute).Unix()}
 	z2 := base.Z{Message: m2, Score: now.Add(15 * time.Minute).Unix()}
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		pending      map[string][]*base.TaskMessage
@@ -1791,7 +1791,7 @@ func TestInspectorArchiveAllScheduledTasks(t *testing.T) {
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -1921,7 +1921,7 @@ func TestInspectorArchiveAllRetryTasks(t *testing.T) {
 	z4 := base.Z{Message: m4, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		retry        map[string][]base.Z
@@ -3106,7 +3106,7 @@ func TestInspectorArchiveTaskArchivesPendingTask(t *testing.T) {
 	m3 := h.NewTaskMessageWithQueue("task3", nil, "custom")
 	now := time.Now()
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		pending      map[string][]*base.TaskMessage
@@ -3201,7 +3201,7 @@ func TestInspectorArchiveTaskArchivesScheduledTask(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		scheduled     map[string][]base.Z
@@ -3278,7 +3278,7 @@ func TestInspectorArchiveTaskArchivesRetryTask(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		retry        map[string][]base.Z
@@ -3353,7 +3353,7 @@ func TestInspectorArchiveTaskError(t *testing.T) {
 	z3 := base.Z{Message: m3, Score: now.Add(2 * time.Minute).Unix()}
 
 	inspector := NewInspector(getRedisConnOpt(t))
-	inspector.rdb.SetClock(timeutil.NewSimulatedClock(now))
+	inspector.backend.(*rdb.RDB).SetClock(timeutil.NewSimulatedClock(now))
 
 	tests := []struct {
 		retry        map[string][]base.Z
