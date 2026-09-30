@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/errors"
+	"github.com/yaziedda/asynq/internal/base"
+	"github.com/yaziedda/asynq/internal/errors"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 

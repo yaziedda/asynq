@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/testutil"
+	"github.com/yaziedda/asynq/internal/base"
+	"github.com/yaziedda/asynq/internal/testutil"
 )
 
 func BenchmarkEnqueue(b *testing.B) {

@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/log"
-	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/yaziedda/asynq/internal/base"
+	"github.com/yaziedda/asynq/internal/log"
+	"github.com/yaziedda/asynq/internal/rdb"
 	"github.com/redis/go-redis/v9"
 	"github.com/robfig/cron/v3"
 )

@@ -16,8 +16,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/timeutil"
+	"github.com/yaziedda/asynq/internal/base"
+	"github.com/yaziedda/asynq/internal/timeutil"
 	"github.com/redis/go-redis/v9"
 )
 

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
+	"github.com/yaziedda/asynq"
 )
 
 func TestRabbitMQInspector(t *testing.T) {

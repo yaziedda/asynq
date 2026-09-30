@@ -12,10 +12,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/rdb"
-	"github.com/hibiken/asynq/internal/testbroker"
-	h "github.com/hibiken/asynq/internal/testutil"
+	"github.com/yaziedda/asynq/internal/base"
+	"github.com/yaziedda/asynq/internal/rdb"
+	"github.com/yaziedda/asynq/internal/testbroker"
+	h "github.com/yaziedda/asynq/internal/testutil"
 	"github.com/redis/go-redis/v9"
 )
 

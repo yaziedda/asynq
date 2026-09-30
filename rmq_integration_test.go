@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
+	"github.com/yaziedda/asynq"
 )
 
 const rabbitmqURL = "amqp://guest:guest@localhost:5672/"

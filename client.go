@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq/internal/base"
-	"github.com/hibiken/asynq/internal/errors"
-	"github.com/hibiken/asynq/internal/rdb"
-	"github.com/hibiken/asynq/internal/rmq"
+	"github.com/yaziedda/asynq/internal/base"
+	"github.com/yaziedda/asynq/internal/errors"
+	"github.com/yaziedda/asynq/internal/rdb"
+	"github.com/yaziedda/asynq/internal/rmq"
 	"github.com/redis/go-redis/v9"
 )
 
