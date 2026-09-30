@@ -83,6 +83,11 @@ func NewBroker(url string) (*Broker, error) {
 		conn.Close()
 		return nil, fmt.Errorf("rmq: failed to declare dead-letter exchange: %w", err)
 	}
+	if err := ch.Confirm(false); err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, fmt.Errorf("rmq: failed to put channel in confirm mode: %w", err)
+	}
 	return &Broker{
 		conn:       conn,
 		channel:    ch,

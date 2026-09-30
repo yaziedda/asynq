@@ -18,6 +18,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/rmq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -54,46 +55,6 @@ type Server struct {
 	healthchecker *healthchecker
 	janitor       *janitor
 	aggregator    *aggregator
-	isRedis       bool
-	workerTracker *workerTracker
-}
-
-// workerTracker drains the starting and finished channels emitted by the
-// processor. On the Redis broker the heartbeater performs this draining as a
-// side effect of publishing server state. On brokers without a state store
-// (e.g. RabbitMQ) nothing else reads these channels, so the processor would
-// block; this component keeps them drained.
-type workerTracker struct {
-	starting <-chan *workerInfo
-	finished <-chan *base.TaskMessage
-	done     chan struct{}
-}
-
-func newWorkerTracker(starting <-chan *workerInfo, finished <-chan *base.TaskMessage) *workerTracker {
-	return &workerTracker{
-		starting: starting,
-		finished: finished,
-		done:     make(chan struct{}),
-	}
-}
-
-func (w *workerTracker) start(wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-w.done:
-				return
-			case <-w.starting:
-			case <-w.finished:
-			}
-		}
-	}()
-}
-
-func (w *workerTracker) shutdown() {
-	w.done <- struct{}{}
 }
 
 type serverState struct {
@@ -466,14 +427,23 @@ const (
 	defaultJanitorBatchSize = 100
 )
 
-// NewServer returns a new Server given a connection option
+// NewServer returns a new Server given a redis connection option
 // and server configuration.
 func NewServer(r RedisConnOpt, cfg Config) *Server {
-	b, isRedis, err := makeBroker(r)
-	if err != nil {
-		panic(err)
+	if opt, ok := r.(RabbitMQClientOpt); ok {
+		b, err := rmq.NewBroker(opt.URL)
+		if err != nil {
+			panic(err)
+		}
+		s := newServer(b, cfg)
+		s.sharedConnection = false
+		return s
 	}
-	server := newServer(b, isRedis, cfg)
+	redisClient, ok := r.MakeRedisClient().(redis.UniversalClient)
+	if !ok {
+		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
+	}
+	server := NewServerFromRedisClient(redisClient, cfg)
 	server.sharedConnection = false
 	return server
 }
@@ -482,10 +452,10 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 // and server configuration
 // Warning: The underlying redis connection pool will not be closed by Asynq, you are responsible for closing it.
 func NewServerFromRedisClient(c redis.UniversalClient, cfg Config) *Server {
-	return newServer(rdb.NewRDB(c), true, cfg)
+	return newServer(rdb.NewRDB(c), cfg)
 }
 
-func newServer(broker base.Broker, isRedis bool, cfg Config) *Server {
+func newServer(broker base.Broker, cfg Config) *Server {
 	baseCtxFn := cfg.BaseContext
 	if baseCtxFn == nil {
 		baseCtxFn = context.Background
@@ -659,8 +629,6 @@ func newServer(broker base.Broker, isRedis bool, cfg Config) *Server {
 		healthchecker:    healthchecker,
 		janitor:          janitor,
 		aggregator:       aggregator,
-		isRedis:          isRedis,
-		workerTracker:    newWorkerTracker(starting, finished),
 	}
 }
 
@@ -733,19 +701,15 @@ func (srv *Server) Start(handler Handler) error {
 	}
 	srv.logger.Info("Starting processing")
 
-	if srv.isRedis {
-		srv.heartbeater.start(&srv.wg)
-		srv.subscriber.start(&srv.wg)
-		srv.recoverer.start(&srv.wg)
-		srv.forwarder.start(&srv.wg)
-		srv.janitor.start(&srv.wg)
-		srv.aggregator.start(&srv.wg)
-	} else {
-		srv.workerTracker.start(&srv.wg)
-	}
+	srv.heartbeater.start(&srv.wg)
 	srv.healthchecker.start(&srv.wg)
+	srv.subscriber.start(&srv.wg)
 	srv.syncer.start(&srv.wg)
+	srv.recoverer.start(&srv.wg)
+	srv.forwarder.start(&srv.wg)
 	srv.processor.start(&srv.wg)
+	srv.janitor.start(&srv.wg)
+	srv.aggregator.start(&srv.wg)
 	return nil
 }
 
@@ -785,25 +749,15 @@ func (srv *Server) Shutdown() {
 	// Sender goroutines should be terminated before the receiver goroutines.
 	// processor -> syncer (via syncCh)
 	// processor -> heartbeater (via starting, finished channels)
-	if srv.isRedis {
-		srv.forwarder.shutdown()
-	}
+	srv.forwarder.shutdown()
 	srv.processor.shutdown()
-	if srv.isRedis {
-		srv.recoverer.shutdown()
-	}
+	srv.recoverer.shutdown()
 	srv.syncer.shutdown()
-	if srv.isRedis {
-		srv.subscriber.shutdown()
-		srv.janitor.shutdown()
-		srv.aggregator.shutdown()
-	}
+	srv.subscriber.shutdown()
+	srv.janitor.shutdown()
+	srv.aggregator.shutdown()
 	srv.healthchecker.shutdown()
-	if srv.isRedis {
-		srv.heartbeater.shutdown()
-	} else {
-		srv.workerTracker.shutdown()
-	}
+	srv.heartbeater.shutdown()
 	srv.wg.Wait()
 
 	if !srv.sharedConnection {

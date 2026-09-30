@@ -1,11 +1,8 @@
-// Copyright 2020 Kentaro Hibino. All rights reserved.
-// Use of this source code is governed by a MIT license
-// that can be found in the LICENSE file.
-
 package rmq
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
@@ -13,43 +10,52 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// publishDelayed publishes msg to the delayed exchange routed to msg.Queue
-// with the given delay in milliseconds (0 = immediate).
-func (b *Broker) publishDelayed(ctx context.Context, msg *base.TaskMessage, delayMS int64) error {
-	if err := b.ensureQueue(msg.Queue); err != nil {
-		return err
+func (b *Broker) publish(ctx context.Context, exchange, routingKey string, headers amqp.Table, data []byte, messageID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pub := amqp.Publishing{
+		ContentType:  "application/x-protobuf",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    messageID,
+		Body:         data,
+		Headers:      headers,
 	}
+	conf, err := b.channel.PublishWithDeferredConfirmWithContext(ctx, exchange, routingKey, false, false, pub)
+	if err != nil {
+		return fmt.Errorf("rmq: publish failed: %w", err)
+	}
+	if !conf.Wait() {
+		return errors.New("rmq: publish not confirmed by broker")
+	}
+	return nil
+}
+
+func (b *Broker) encodeAndPublish(ctx context.Context, exchange, routingKey string, headers amqp.Table, msg *base.TaskMessage) error {
 	data, err := base.EncodeMessage(msg)
 	if err != nil {
 		return err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.channel.PublishWithContext(ctx, delayedExchange, msg.Queue, false, false, amqp.Publishing{
-		ContentType:  "application/x-protobuf",
-		DeliveryMode: amqp.Persistent,
-		MessageId:    msg.ID,
-		Body:         data,
-		Headers:      amqp.Table{"x-delay": delayMS},
-	})
+	return b.publish(ctx, exchange, routingKey, headers, data, msg.ID)
 }
 
-// Enqueue publishes a task for immediate processing.
 func (b *Broker) Enqueue(ctx context.Context, msg *base.TaskMessage) error {
-	return b.publishDelayed(ctx, msg, 0)
-}
-
-// Schedule publishes a task to be processed at processAt.
-func (b *Broker) Schedule(ctx context.Context, msg *base.TaskMessage, processAt time.Time) error {
-	delay := time.Until(processAt).Milliseconds()
-	if delay < 0 {
-		delay = 0
+	if err := b.ensureQueue(msg.Queue); err != nil {
+		return err
 	}
-	return b.publishDelayed(ctx, msg, delay)
+	return b.encodeAndPublish(ctx, "", msg.Queue, nil, msg)
 }
 
-// Retry re-schedules a failed task with backoff, or archives it to the
-// dead-letter queue when retries are exhausted.
+func (b *Broker) Schedule(ctx context.Context, msg *base.TaskMessage, processAt time.Time) error {
+	if err := b.ensureQueue(msg.Queue); err != nil {
+		return err
+	}
+	delay := time.Until(processAt).Milliseconds()
+	if delay <= 0 {
+		return b.Enqueue(ctx, msg)
+	}
+	return b.encodeAndPublish(ctx, delayedExchange, msg.Queue, amqp.Table{"x-delay": delay}, msg)
+}
+
 func (b *Broker) Retry(ctx context.Context, msg *base.TaskMessage, processAt time.Time, errMsg string, isFailure bool) error {
 	msg.ErrorMsg = errMsg
 	if isFailure {
@@ -62,27 +68,14 @@ func (b *Broker) Retry(ctx context.Context, msg *base.TaskMessage, processAt tim
 	return b.Schedule(ctx, msg, processAt)
 }
 
-// Archive publishes a task to its dead-letter queue for inspection.
 func (b *Broker) Archive(ctx context.Context, msg *base.TaskMessage, errMsg string) error {
 	msg.ErrorMsg = errMsg
 	if err := b.ensureDeadLetterQueue(msg.Queue); err != nil {
 		return err
 	}
-	data, err := base.EncodeMessage(msg)
-	if err != nil {
-		return err
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.channel.PublishWithContext(ctx, deadLetterExchange, msg.Queue, false, false, amqp.Publishing{
-		ContentType:  "application/x-protobuf",
-		DeliveryMode: amqp.Persistent,
-		MessageId:    msg.ID,
-		Body:         data,
-	})
+	return b.encodeAndPublish(ctx, deadLetterExchange, msg.Queue, nil, msg)
 }
 
-// Requeue puts a task back onto its queue for immediate reprocessing.
 func (b *Broker) Requeue(ctx context.Context, msg *base.TaskMessage) error {
 	b.mu.Lock()
 	tag, ok := b.deliveries[msg.ID]
@@ -91,7 +84,6 @@ func (b *Broker) Requeue(ctx context.Context, msg *base.TaskMessage) error {
 	}
 	b.mu.Unlock()
 	if ok {
-		// Nack with requeue=true returns the original delivery to the queue.
 		if err := b.channel.Nack(tag, false, true); err == nil {
 			return nil
 		}
@@ -99,10 +91,6 @@ func (b *Broker) Requeue(ctx context.Context, msg *base.TaskMessage) error {
 	return b.Enqueue(ctx, msg)
 }
 
-// Dequeue pulls the next available task from the given queues, checking
-// them in the order provided. It blocks with a short poll interval until a
-// task is available. Returns errors.ErrNoProcessableTask when all queues
-// are empty.
 func (b *Broker) Dequeue(qnames ...string) (*base.TaskMessage, time.Time, error) {
 	for _, qname := range qnames {
 		if err := b.ensureQueue(qname); err != nil {
@@ -119,7 +107,6 @@ func (b *Broker) Dequeue(qnames ...string) (*base.TaskMessage, time.Time, error)
 		}
 		msg, err := base.DecodeMessage(delivery.Body)
 		if err != nil {
-			// discard malformed message so it doesn't block the queue.
 			_ = delivery.Nack(false, false)
 			continue
 		}
@@ -131,7 +118,6 @@ func (b *Broker) Dequeue(qnames ...string) (*base.TaskMessage, time.Time, error)
 	return nil, time.Time{}, errors.E(errors.Op("rmq.Dequeue"), errors.NotFound, errors.ErrNoProcessableTask)
 }
 
-// Done acknowledges successful processing of a task.
 func (b *Broker) Done(ctx context.Context, msg *base.TaskMessage) error {
 	b.mu.Lock()
 	tag, ok := b.deliveries[msg.ID]
@@ -143,4 +129,8 @@ func (b *Broker) Done(ctx context.Context, msg *base.TaskMessage) error {
 		return nil
 	}
 	return b.channel.Ack(tag, false)
+}
+
+func (b *Broker) MarkAsComplete(ctx context.Context, msg *base.TaskMessage) error {
+	return b.Done(ctx, msg)
 }

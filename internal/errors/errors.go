@@ -174,6 +174,9 @@ var (
 
 	// ErrTaskIdConflict indicates that another task with the same task ID already exist
 	ErrTaskIdConflict = errors.New("task id conflicts with another task")
+
+	// ErrNotSupported indicates that the requested operation is not supported by the broker.
+	ErrNotSupported = errors.New("operation not supported")
 )
 
 // TaskNotFoundError indicates that a task with the given ID does not exist

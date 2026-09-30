@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/redis/go-redis/v9"
 )
@@ -61,6 +62,11 @@ func (s *subscriber) start(wg *sync.WaitGroup) {
 		for {
 			pubsub, err = s.broker.CancelationPubSub()
 			if err != nil {
+				if errors.Is(err, errors.ErrNotSupported) {
+					<-s.done
+					s.logger.Debug("Subscriber done")
+					return
+				}
 				s.logger.Errorf("cannot subscribe to cancelation channel: %v", err)
 				select {
 				case <-time.After(s.retryTimeout):

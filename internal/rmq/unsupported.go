@@ -13,7 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var errUnsupported = errors.E(errors.Op("rmq"), errors.Internal, "operation not supported on rabbitmq broker")
+var errUnsupported = errors.ErrNotSupported
 
 func (b *Broker) EnqueueUnique(ctx context.Context, msg *base.TaskMessage, ttl time.Duration) error {
 	return errUnsupported
@@ -38,10 +38,6 @@ func (b *Broker) BatchEnqueue(ctx context.Context, items []base.BatchEnqueueItem
 		count++
 	}
 	return count, nil
-}
-
-func (b *Broker) MarkAsComplete(ctx context.Context, msg *base.TaskMessage) error {
-	return b.Done(ctx, msg)
 }
 
 func (b *Broker) ForwardIfReady(qnames ...string) error {

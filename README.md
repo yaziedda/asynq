@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Gitter chat](https://badges.gitter.im/go-asynq/gitter.svg)](https://gitter.im/go-asynq/community)
 
-Asynq is a Go library for queueing tasks and processing them asynchronously with workers. It's backed by [Redis](https://redis.io/) and is designed to be scalable yet easy to get started.
+Asynq is a Go library for queueing tasks and processing them asynchronously with workers. It's backed by [Redis](https://redis.io/) (default) or **RabbitMQ**, and is designed to be scalable yet easy to get started.
 
 Highlevel overview of how Asynq works:
 
@@ -41,6 +41,58 @@ Task queues are used as a mechanism to distribute work across multiple machines.
 - Integration with [Prometheus](https://prometheus.io/) to collect and visualize queue metrics
 - [Web UI](#web-ui) to inspect and remote-control queues and tasks
 - [CLI](#command-line-tool) to inspect and remote-control queues and tasks
+
+## RabbitMQ Broker
+
+Asynq can run with **RabbitMQ** as the message broker instead of Redis. Only the connection option changes; every client and server API stays identical.
+
+```go
+// Redis (default)
+client := asynq.NewClient(asynq.RedisClientOpt{Addr: "localhost:6379"})
+
+// RabbitMQ — same functions, different broker
+client := asynq.NewClient(asynq.RabbitMQClientOpt{URL: "amqp://guest:guest@localhost:5672/"})
+```
+
+The same `RabbitMQClientOpt` is passed to `asynq.NewServer` too. `Enqueue`, `ProcessIn`, `ProcessAt`, `MaxRetry`, `Queue`, `NewServeMux`, `HandleFunc`, `Run`, and `Shutdown` are unchanged.
+
+### Prerequisite
+
+The [`rabbitmq-delayed-message-exchange`](https://github.com/rabbitmq/rabbitmq-delayed-message-exchange) plugin must be enabled on the RabbitMQ server. It powers scheduling (`ProcessIn`/`ProcessAt`) and retry backoff. Quick start with Docker:
+
+```sh
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 \
+  heidiks/rabbitmq-delayed-message-exchange:latest
+```
+
+### Supported features (RabbitMQ)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Enqueue / Dequeue | ✅ | Publish/consume via AMQP |
+| Scheduling (`ProcessIn`, `ProcessAt`) | ✅ | Via delayed-message exchange |
+| Retry with exponential backoff | ✅ | Re-published with `x-delay` |
+| Dead-letter for exhausted retries (Archive) | ✅ | Routed to `asynq:dead_letter:<queue>` |
+| Multiple queues & weighted/strict priority | ✅ | One AMQP queue per queue name |
+| Concurrency / worker pool | ✅ | Maps to prefetch/QoS |
+| Timeout & deadline per task | ✅ | Handled server-side in Go |
+| `ServeMux` routing & middleware | ✅ | Identical to Redis |
+| Graceful shutdown | ✅ | Waits for in-flight workers |
+
+### Not supported (RabbitMQ)
+
+These require a queryable state store, which the RabbitMQ broker intentionally omits. They return `not supported` errors or are no-ops:
+
+| Feature | Reason |
+|---|---|
+| Inspector (list/get/delete tasks by ID or state) | RabbitMQ has no random-access task lookup |
+| Web UI / CLI dashboard & per-state stats | Depends on Inspector |
+| Unique tasks / de-duplication (`Unique`) | No dedup lookup |
+| Group aggregation (`Group`) | No place to hold group members |
+| Task result storage & retention | No result store |
+| Automatic recovery of tasks on worker crash | No lease store; ack occurs on dequeue |
+
+If you need any of the "not supported" features, use the Redis broker.
 
 ## Stability and Compatibility
 

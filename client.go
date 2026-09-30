@@ -16,6 +16,7 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/rmq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -34,12 +35,20 @@ type Client struct {
 
 // NewClient returns a new Client instance given a connection option.
 func NewClient(r RedisConnOpt) *Client {
-	broker, isRedis, err := makeBroker(r)
-	if err != nil {
-		panic(err)
+	if opt, ok := r.(RabbitMQClientOpt); ok {
+		b, err := rmq.NewBroker(opt.URL)
+		if err != nil {
+			panic(err)
+		}
+		return &Client{broker: b}
 	}
-	_ = isRedis
-	return &Client{broker: broker, sharedConnection: false}
+	redisClient, ok := r.MakeRedisClient().(redis.UniversalClient)
+	if !ok {
+		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
+	}
+	client := NewClientFromRedisClient(redisClient)
+	client.sharedConnection = false
+	return client
 }
 
 // NewClientFromRedisClient returns a new instance of Client given a redis.UniversalClient
