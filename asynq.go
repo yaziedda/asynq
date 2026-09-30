@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq/internal/base"
+	"github.com/hibiken/asynq/internal/rdb"
+	"github.com/hibiken/asynq/internal/rmq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -258,10 +260,47 @@ func (s TaskState) String() string {
 //   - RedisClientOpt
 //   - RedisFailoverClientOpt
 //   - RedisClusterClientOpt
+//   - RabbitMQClientOpt
 type RedisConnOpt interface {
 	// MakeRedisClient returns a new redis client instance.
 	// Return value is intentionally opaque to hide the implementation detail of redis client.
 	MakeRedisClient() interface{}
+}
+
+// RabbitMQClientOpt is used to create a broker backed by RabbitMQ instead of Redis.
+//
+// It is accepted anywhere a RedisConnOpt is accepted (e.g. NewClient, NewServer).
+// When a RabbitMQ broker is used, state-store-dependent features (Inspector,
+// web dashboard, unique tasks, group aggregation) are not available; the core
+// task queue (enqueue, schedule, retry with backoff, dead-letter) works as usual.
+//
+// The rabbitmq-delayed-message-exchange plugin must be enabled on the RabbitMQ
+// server to support ProcessIn/ProcessAt scheduling and retry backoff.
+type RabbitMQClientOpt struct {
+	// URL is the AMQP connection string, e.g. "amqp://guest:guest@localhost:5672/".
+	URL string
+}
+
+// MakeRedisClient satisfies the RedisConnOpt interface so RabbitMQClientOpt can be
+// passed to NewClient and NewServer. It returns nil; the actual broker is built by
+// makeBroker, which intercepts RabbitMQClientOpt before this is ever used.
+func (opt RabbitMQClientOpt) MakeRedisClient() interface{} { return nil }
+
+// makeBroker builds a base.Broker from a connection option. It intercepts
+// RabbitMQClientOpt to build a RabbitMQ broker; otherwise it builds a Redis broker.
+func makeBroker(r RedisConnOpt) (base.Broker, bool, error) {
+	if opt, ok := r.(RabbitMQClientOpt); ok {
+		b, err := rmq.NewBroker(opt.URL)
+		if err != nil {
+			return nil, false, err
+		}
+		return b, false, nil // false: not a redis broker
+	}
+	c, ok := r.MakeRedisClient().(redis.UniversalClient)
+	if !ok {
+		return nil, false, fmt.Errorf("asynq: unsupported RedisConnOpt type %T", r)
+	}
+	return rdb.NewRDB(c), true, nil // true: redis broker
 }
 
 // RedisClientOpt is used to create a redis client that connects

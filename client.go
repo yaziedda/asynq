@@ -32,15 +32,14 @@ type Client struct {
 	sharedConnection bool
 }
 
-// NewClient returns a new Client instance given a redis connection option.
+// NewClient returns a new Client instance given a connection option.
 func NewClient(r RedisConnOpt) *Client {
-	redisClient, ok := r.MakeRedisClient().(redis.UniversalClient)
-	if !ok {
-		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
+	broker, isRedis, err := makeBroker(r)
+	if err != nil {
+		panic(err)
 	}
-	client := NewClientFromRedisClient(redisClient)
-	client.sharedConnection = false
-	return client
+	_ = isRedis
+	return &Client{broker: broker, sharedConnection: false}
 }
 
 // NewClientFromRedisClient returns a new instance of Client given a redis.UniversalClient
